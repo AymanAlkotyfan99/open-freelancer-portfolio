@@ -1,18 +1,28 @@
+# Environment files
 .env
-.env.local
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime uploads
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep
+
+# Python
 .venv/
 __pycache__/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.uv-cache/
-.vitest/
-node_modules/
-.next/
-coverage/
+*.pyc
+
+# Next.js
+apps/web/.next/
+apps/web/node_modules/
+apps/web/.env.local
+
+# Testing
 playwright-report/
 test-results/
-*.pyc
-*.db
-*.log
-.DS_Store
+.pytest_cache/

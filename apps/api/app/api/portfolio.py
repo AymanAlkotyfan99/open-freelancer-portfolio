@@ -1144,6 +1144,7 @@ async def update_profile_photo(
     db.add(MediaAsset(cloudinary_public_id=result["public_id"], secure_url=result["secure_url"], resource_type="image", mime_type=file.content_type, size_bytes=len(content), width=result.get("width"), height=result.get("height")))
     db.add(audit(admin, "replace_photo", "profile", profile.id, request))
     await db.commit()
+    await db.refresh(profile)
     if old_public_id and not await public_id_in_use(db, old_public_id):
         await destroy_media(old_public_id, "image")
     return row_dict(profile)

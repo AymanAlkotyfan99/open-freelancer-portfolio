@@ -24,8 +24,21 @@ VIDEO_RULES: dict[str, MediaRule] = {
 }
 
 
+def local_media_root() -> Path:
+    configured = Path(settings.local_media_dir)
+    return configured.resolve() if configured.is_absolute() else (Path(__file__).resolve().parents[2] / configured).resolve()
+
+
+def cloudinary_configured() -> bool:
+    return bool(
+        settings.cloudinary_cloud_name
+        and settings.cloudinary_api_key
+        and settings.cloudinary_api_secret
+    )
+
+
 def cloudinary_ready() -> None:
-    if not (settings.cloudinary_cloud_name and settings.cloudinary_api_key and settings.cloudinary_api_secret):
+    if not cloudinary_configured():
         raise HTTPException(503, "Media storage is not configured")
     cloudinary.config(
         cloud_name=settings.cloudinary_cloud_name,
@@ -54,6 +67,38 @@ async def validate_media(file: UploadFile, allow_video: bool = True) -> tuple[by
     return content, media_type
 
 
+def media_extension(content: bytes, media_type: str) -> str:
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp"
+    if content[4:8] == b"ftyp" and content[8:12] in {b"avif", b"avis"}:
+        return ".avif"
+    if media_type == "video" and content[4:8] == b"ftyp":
+        return ".mp4"
+    if media_type == "video" and content.startswith(b"\x1aE\xdf\xa3"):
+        return ".webm"
+    raise HTTPException(422, "Unsupported media content")
+
+
+async def upload_local_media(content: bytes, media_type: str, folder: str) -> dict[str, Any]:
+    root = local_media_root()
+    safe_parts = [part for part in folder.replace("\\", "/").split("/") if part and part not in {".", ".."}]
+    destination_dir = root.joinpath(*safe_parts)
+    destination = destination_dir / f"{secrets.token_urlsafe(18)}{media_extension(content, media_type)}"
+    await asyncio.to_thread(destination_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(destination.write_bytes, content)
+    relative = destination.relative_to(root).as_posix()
+    return {
+        "secure_url": f"{settings.api_public_url.rstrip('/')}/uploads/{relative}",
+        "public_id": f"local:{relative}",
+        "width": None,
+        "height": None,
+    }
+
+
 async def upload_media(
     content: bytes,
     media_type: str,
@@ -61,6 +106,10 @@ async def upload_media(
     *,
     transformation: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if not cloudinary_configured():
+        if settings.environment == "production":
+            cloudinary_ready()
+        return await upload_local_media(content, media_type, folder)
     cloudinary_ready()
     options: dict[str, Any] = {
         "folder": folder,
@@ -74,6 +123,12 @@ async def upload_media(
 
 
 async def destroy_media(public_id: str, media_type: str) -> None:
+    if public_id.startswith("local:"):
+        root = local_media_root()
+        destination = (root / public_id.removeprefix("local:")).resolve()
+        if destination != root and root in destination.parents:
+            await asyncio.to_thread(destination.unlink, missing_ok=True)
+        return
     cloudinary_ready()
     result = await asyncio.to_thread(
         cloudinary.uploader.destroy,

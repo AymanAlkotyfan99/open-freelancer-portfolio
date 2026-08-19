@@ -3,6 +3,9 @@ from io import BytesIO
 import pytest
 
 from app.api import portfolio
+from app.core.config import settings
+from app.database.session import SessionLocal
+from app.models.entities import Profile
 
 
 def project_payload():
@@ -91,3 +94,49 @@ async def test_service_cover_upload_and_reference_safe_delete(client, admin, mon
     deleted = await client.delete(f"/api/v1/admin/services/{service['id']}/cover")
     assert deleted.status_code == 204
     assert destroyed == [("service-cover", "image")]
+
+
+@pytest.mark.asyncio
+async def test_profile_photo_persists_in_local_development_storage(client, admin, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "cloudinary_cloud_name", "")
+    monkeypatch.setattr(settings, "cloudinary_api_key", "")
+    monkeypatch.setattr(settings, "cloudinary_api_secret", "")
+    monkeypatch.setattr(settings, "local_media_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "api_public_url", "http://localhost:8000")
+    async with SessionLocal() as db:
+        db.add(
+            Profile(
+                name_en="Ayman Naeem",
+                name_ar="أيمن نعيم",
+                title_en="Software Engineer",
+                title_ar="مهندس برمجيات",
+                statement_en="Profile statement",
+                statement_ar="نبذة شخصية",
+                about_en="About profile",
+                about_ar="عن الملف الشخصي",
+                email="ayman@example.com",
+                phone="+963000000000",
+                location_en="Syria",
+                location_ar="سوريا",
+            )
+        )
+        await db.commit()
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+    uploaded = await client.post(
+        "/api/v1/admin/profile/photo",
+        files={"file": ("profile.png", BytesIO(png), "image/png")},
+        data={"alt_text_en": "Profile portrait", "alt_text_ar": "الصورة الشخصية"},
+    )
+    assert uploaded.status_code == 200
+    result = uploaded.json()
+    assert result["profile_image_url"].startswith("http://localhost:8000/uploads/")
+    relative = result["profile_image_public_id"].removeprefix("local:")
+    saved_file = tmp_path / relative
+    assert saved_file.read_bytes() == png
+    assert (await client.get("/api/v1/profile")).json()["profile_image_url"] == result["profile_image_url"]
+
+    deleted = await client.delete("/api/v1/admin/profile/photo")
+    assert deleted.status_code == 204
+    assert not saved_file.exists()

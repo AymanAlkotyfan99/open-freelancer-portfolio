@@ -20,7 +20,7 @@ Public content is explicitly bilingual (`*_en`, `*_ar`). Draft/archived projects
 
 ## Media lifecycle
 
-`project_media` is the normalized ordered gallery for uploaded images/videos and external YouTube/Vimeo URLs. It stores Cloudinary public IDs, secure URLs, thumbnail/metadata fields, cover selection, and ordering. `media_assets` is the shared deletion registry. The backend validates extension, MIME declaration, signature, and size before upload. Deleting a record destroys a Cloudinary asset only after reference checks; referenced projects/services are archived instead of hard-deleted.
+`project_media` is the normalized ordered gallery for uploaded images/videos and external YouTube/Vimeo URLs. It stores provider IDs, secure URLs, thumbnail/metadata fields, cover selection, and ordering. `media_assets` is the shared deletion registry. The backend validates extension, MIME declaration, signature, and size before upload. Development falls back to API-served local media when Cloudinary is not configured; production still requires Cloudinary. Deleting a record destroys the stored asset only after reference checks; referenced projects/services are archived instead of hard-deleted.
 
 ## Security boundaries
 

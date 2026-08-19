@@ -4,10 +4,12 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from app.api.portfolio import router as portfolio_router
 from app.api.router import router
 from app.core.config import settings
+from app.services.media import local_media_root
 
 app = FastAPI(
     title=settings.app_name, docs_url=None if settings.environment == "production" else "/docs"
@@ -46,3 +48,4 @@ async def unhandled(_: Request, __: Exception) -> JSONResponse:
 
 app.include_router(portfolio_router, prefix="/api/v1")
 app.include_router(router, prefix="/api/v1")
+app.mount("/uploads", StaticFiles(directory=local_media_root(), check_dir=False), name="uploads")

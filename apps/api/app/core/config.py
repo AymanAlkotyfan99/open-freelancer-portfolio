@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./portfolio.db"
     frontend_url: str = "http://localhost:3000"
     cors_origins: str = "http://localhost:3000"
+    api_public_url: str = "http://localhost:8000"
+    local_media_dir: str = "uploads"
     jwt_secret_key: str = Field("development-only-change-me-32-chars", min_length=24)
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7

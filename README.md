@@ -31,7 +31,7 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open `http://localhost:3000/en`, `/ar`, and `/admin`. Development can omit email and Turnstile credentials; Turnstile is bypassed outside production and an email-provider failure never loses database records. Cloudinary credentials are required for actual uploads.
+Open `http://localhost:3000/en`, `/ar`, and `/admin`. Development can omit email, Turnstile, and Cloudinary credentials; validated media is stored under `apps/api/uploads` when Cloudinary is absent locally. Production requires Cloudinary, Turnstile, and the documented provider configuration.
 
 ## Docker development
 

@@ -17,7 +17,7 @@ const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1
 
 async function read<T>(path: string, fallback: T): Promise<T> {
   try {
-    const seconds = Number(process.env.CONTENT_REVALIDATE_SECONDS ?? "60");
+    const seconds = Number(process.env.CONTENT_REVALIDATE_SECONDS ?? (process.env.NODE_ENV === "development" ? "0" : "60"));
     const response = await fetch(`${apiBase}${path}`, seconds === 0 ? { cache: "no-store" } : { next: { revalidate: seconds } });
     return response.ok ? await response.json() as T : fallback;
   } catch { return fallback; }
@@ -46,6 +46,7 @@ async function managedServices() {
 
 const localized = (row: Row | ProfileRecord, field: string, locale: Locale, fallback = "") => String(row[`${field}_${locale}`] ?? fallback);
 const validLink = (value: unknown): value is string => typeof value === "string" && /^https:\/\//.test(value) && !value.includes("[");
+const validMediaUrl = (value: unknown): value is string => typeof value === "string" && (/^https:\/\//.test(value) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(value)) && !value.includes("[");
 
 function JsonLd({ data }: { data: Record<string, unknown> }) {
   return <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(data).replaceAll("<", "\\u003c") }} />;
@@ -68,13 +69,13 @@ export async function Home({ locale }: { locale: Locale }) {
   const heroHeading = localized(profile, "hero_heading", locale, name);
   const statement = localized(profile, "hero_subheading", locale, localized(profile, "statement", locale, c.statement));
   return <main>
-    <JsonLd data={{ "@context": "https://schema.org", "@type": "Person", name, jobTitle: localized(profile, "title", locale, c.title), description: statement, url: process.env.NEXT_PUBLIC_SITE_URL, image: validLink(profile.profile_image_url) ? profile.profile_image_url : undefined, sameAs: Object.values(profileLinks).filter(validLink) }} />
+    <JsonLd data={{ "@context": "https://schema.org", "@type": "Person", name, jobTitle: localized(profile, "title", locale, c.title), description: statement, url: process.env.NEXT_PUBLIC_SITE_URL, image: validMediaUrl(profile.profile_image_url) ? profile.profile_image_url : undefined, sameAs: Object.values(profileLinks).filter(validLink) }} />
     <section className="hero"><div className="hero-backdrop" aria-hidden /><div className="shell hero-layout"><Reveal className="hero-copy">
       <p className="kicker"><i className="dot" />{String(profile.availability_status || c.available)}</p>
       <h1 className="display">{heroHeading}</h1><p className="hero-title">{localized(profile, "title", locale, c.title)}</p><p className="hero-intro">{statement}</p>
       <div className="actions"><Button asChild><Link href={`/${locale}/projects`}>{c.work}<ArrowUpRight size={16} /></Link></Button><Button asChild variant="outline"><Link href={`/${locale}/services`}>{locale === "en" ? "Explore services" : "استكشف الخدمات"}</Link></Button><Button asChild variant="outline"><Link href={`/${locale}/request-project`}>{c.hire}</Link></Button>{validLink(profile.cv_url) && <Button asChild variant="ghost"><a href={profile.cv_url} target="_blank" rel="noreferrer"><Download size={16} />{c.cv}</a></Button>}</div>
       <div className="social-row">{validLink(profileLinks.github) && <a className="icon-button glass" aria-label="GitHub" href={profileLinks.github} target="_blank" rel="noreferrer"><Github size={18} /></a>}{validLink(profileLinks.linkedin) && <a className="icon-button glass" aria-label="LinkedIn" href={profileLinks.linkedin} target="_blank" rel="noreferrer"><Linkedin size={18} /></a>}{validLink(profileLinks.upwork) && <a className="icon-button glass" aria-label="Upwork" href={profileLinks.upwork} target="_blank" rel="noreferrer"><BriefcaseBusiness size={18} /></a>}</div>
-    </Reveal><Reveal className="portrait-wrap">{validLink(profile.profile_image_url) ? <div className="portrait-frame"><Image src={profile.profile_image_url} alt={localized(profile, "profile_image_alt", locale, name)} fill priority sizes="(max-width: 768px) 82vw, 38vw" style={{ objectPosition: String(profile.profile_image_position || "50% 50%") }} /></div> : <div className="portrait-placeholder"><span>{name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><Sparkles /></div>}</Reveal></div></section>
+    </Reveal><Reveal className="portrait-wrap">{validMediaUrl(profile.profile_image_url) ? <div className="portrait-frame"><Image src={profile.profile_image_url} alt={localized(profile, "profile_image_alt", locale, name)} fill priority unoptimized sizes="(max-width: 768px) 82vw, 38vw" style={{ objectPosition: String(profile.profile_image_position || "50% 50%") }} /></div> : <div className="portrait-placeholder"><span>{name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><Sparkles /></div>}</Reveal></div></section>
     <Reveal><section className="section"><div className="shell intro-grid"><div><p className="eyebrow">01 — {c.intro}</p><h2 className="h2">{c.intro}</h2></div><div><p className="lead-copy">{localized(profile, "about", locale, c.summary)}</p><div className="stats"><div className="stat"><b>AI</b><span>Agents · RAG · LLM</span></div><div className="stat"><b>API</b><span>Python · FastAPI</span></div><div className="stat"><b>Data</b><span>SQL · ETL · BI</span></div></div></div></div></section></Reveal>
     <Reveal><section className="section"><div className="shell"><div className="section-heading"><div><p className="eyebrow">02 — Portfolio</p><h2 className="h2">{c.selected}</h2></div><Link href={`/${locale}/projects`}>{c.allProjects}<ArrowUpRight size={16} /></Link></div><ProjectBrowser projects={projects.slice(0, 4)} locale={locale} /></div></section></Reveal>
     <Skills locale={locale} compact />

@@ -481,13 +481,14 @@ async def admin_create(
         )
     )
     await db.commit()
+    await db.refresh(row)
     return as_dict(row)
 
 
 @router.patch("/admin/{resource}/{entity_id}")
 async def admin_update(
     resource: str,
-    entity_id: str,
+    entity_id: UUID,
     data: dict[str, Any],
     admin: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
@@ -503,10 +504,11 @@ async def admin_update(
                 admin_id=admin.id,
                 action="status_update",
                 entity_type="contact_message",
-                entity_id=entity_id,
+                entity_id=str(entity_id),
             )
         )
         await db.commit()
+        await db.refresh(contact_row)
         return as_dict(contact_row)
     if resource == "project-requests":
         row = await db.get(ProjectRequest, entity_id)
@@ -531,10 +533,11 @@ async def admin_update(
                 admin_id=admin.id,
                 action="status_update",
                 entity_type="project_request",
-                entity_id=entity_id,
+                entity_id=str(entity_id),
             )
         )
         await db.commit()
+        await db.refresh(row)
         return as_dict(row)
     model = ADMIN_MODELS.get(resource)
     if not model:
@@ -551,18 +554,19 @@ async def admin_update(
             admin_id=admin.id,
             action="update",
             entity_type=resource,
-            entity_id=entity_id,
+            entity_id=str(entity_id),
             details={"fields": list(data)},
         )
     )
     await db.commit()
+    await db.refresh(row)
     return as_dict(row)
 
 
 @router.delete("/admin/{resource}/{entity_id}", status_code=204)
 async def admin_delete(
     resource: str,
-    entity_id: str,
+    entity_id: UUID,
     admin: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
@@ -576,7 +580,14 @@ async def admin_delete(
             row.is_active = False
     else:
         await db.delete(row)
-    db.add(AuditLog(admin_id=admin.id, action="delete", entity_type=resource, entity_id=entity_id))
+    db.add(
+        AuditLog(
+            admin_id=admin.id,
+            action="delete",
+            entity_type=resource,
+            entity_id=str(entity_id),
+        )
+    )
     await db.commit()
     return Response(status_code=204)
 
@@ -607,7 +618,7 @@ async def admin_requests(
 
 @router.patch("/admin/project-requests/{entity_id}")
 async def update_request(
-    entity_id: str,
+    entity_id: UUID,
     payload: StatusPatch,
     admin: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
@@ -624,10 +635,11 @@ async def update_request(
             admin_id=admin.id,
             action="status_update",
             entity_type="project_request",
-            entity_id=entity_id,
+            entity_id=str(entity_id),
         )
     )
     await db.commit()
+    await db.refresh(row)
     return as_dict(row)
 
 
