@@ -17,7 +17,7 @@ export function Turnstile({ locale, onToken }: { locale: Locale; onToken: (token
     if (!siteKey) return;
     const render = () => {
       const element = document.getElementById(elementId);
-      if (element && window.turnstile && !widget.current) widget.current = window.turnstile.render(element, { sitekey: siteKey, language: locale, callback: onToken, "expired-callback": () => onToken("") });
+      if (element && window.turnstile && !widget.current) widget.current = window.turnstile.render(element, { sitekey: siteKey, language: locale, callback: onToken, "expired-callback": () => onToken(""), "error-callback": () => onToken(""), "timeout-callback": () => onToken("") });
     };
     const timer = window.setInterval(render, 250);
     render();

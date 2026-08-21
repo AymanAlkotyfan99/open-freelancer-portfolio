@@ -21,6 +21,13 @@ __pycache__/
 apps/web/.next/
 apps/web/node_modules/
 apps/web/.env.local
+apps/web/tsconfig.tsbuildinfo
+apps/web/.vitest/
+
+# Local tool caches
+.uv-cache/
+.mypy_cache/
+.ruff_cache/
 
 # Testing
 playwright-report/

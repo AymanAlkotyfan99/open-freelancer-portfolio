@@ -14,13 +14,18 @@ import { Button } from "./ui/button";
 
 type Row = Record<string, unknown>;
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const isProductionDeployment = process.env.APP_ENVIRONMENT === "production";
 
 async function read<T>(path: string, fallback: T): Promise<T> {
   try {
     const seconds = Number(process.env.CONTENT_REVALIDATE_SECONDS ?? (process.env.NODE_ENV === "development" ? "0" : "60"));
     const response = await fetch(`${apiBase}${path}`, seconds === 0 ? { cache: "no-store" } : { next: { revalidate: seconds } });
+    if (!response.ok && isProductionDeployment) throw new Error(`Content API returned ${response.status}`);
     return response.ok ? await response.json() as T : fallback;
-  } catch { return fallback; }
+  } catch (error) {
+    if (isProductionDeployment) throw error;
+    return fallback;
+  }
 }
 
 function projectFallbacks(): ProjectRecord[] {
@@ -36,7 +41,7 @@ function projectFallbacks(): ProjectRecord[] {
 
 async function managedProjects() {
   const data = await read<PageResult<ProjectRecord>>("/projects?paginated=true&page_size=50&sort=featured", { items: [], page: 1, page_size: 50, total: 0, pages: 0 });
-  return data.items.length ? data.items : projectFallbacks();
+  return data.items.length || isProductionDeployment ? data.items : projectFallbacks();
 }
 
 async function managedServices() {
@@ -79,7 +84,7 @@ export async function Home({ locale }: { locale: Locale }) {
     <Reveal><section className="section"><div className="shell intro-grid"><div><p className="eyebrow">01 — {c.intro}</p><h2 className="h2">{c.intro}</h2></div><div><p className="lead-copy">{localized(profile, "about", locale, c.summary)}</p><div className="stats"><div className="stat"><b>AI</b><span>Agents · RAG · LLM</span></div><div className="stat"><b>API</b><span>Python · FastAPI</span></div><div className="stat"><b>Data</b><span>SQL · ETL · BI</span></div></div></div></div></section></Reveal>
     <Reveal><section className="section"><div className="shell"><div className="section-heading"><div><p className="eyebrow">02 — Portfolio</p><h2 className="h2">{c.selected}</h2></div><Link href={`/${locale}/projects`}>{c.allProjects}<ArrowUpRight size={16} /></Link></div><ProjectBrowser projects={projects.slice(0, 4)} locale={locale} /></div></section></Reveal>
     <Skills locale={locale} compact />
-    <Reveal><section className="section"><div className="shell"><div className="section-heading"><div><p className="eyebrow">04 — {c.services}</p><h2 className="h2">{locale === "en" ? "Professional services, clearly scoped." : "خدمات احترافية بنطاق واضح."}</h2></div><Link href={`/${locale}/services`}>{locale === "en" ? "All services" : "كل الخدمات"}<ArrowUpRight size={16} /></Link></div>{services.length ? <div className="featured-services">{services.slice(0, 4).map((service) => <Link href={`/${locale}/services/${service.slug}`} className="featured-service" key={service.id}><Sparkles /><span>{locale === "ar" ? service.title_ar : service.title_en}</span><ArrowUpRight /></Link>)}</div> : <div className="featured-services">{seededServiceNames.slice(0, 4).map((name) => <div className="featured-service" key={name}><Sparkles /><span>{name}</span></div>)}</div>}</div></section></Reveal>
+    <Reveal><section className="section"><div className="shell"><div className="section-heading"><div><p className="eyebrow">04 — {c.services}</p><h2 className="h2">{locale === "en" ? "Professional services, clearly scoped." : "خدمات احترافية بنطاق واضح."}</h2></div><Link href={`/${locale}/services`}>{locale === "en" ? "All services" : "كل الخدمات"}<ArrowUpRight size={16} /></Link></div>{services.length ? <div className="featured-services">{services.slice(0, 4).map((service) => <Link href={`/${locale}/services/${service.slug}`} className="featured-service" key={service.id}><Sparkles /><span>{locale === "ar" ? service.title_ar : service.title_en}</span><ArrowUpRight /></Link>)}</div> : !isProductionDeployment ? <div className="featured-services">{seededServiceNames.slice(0, 4).map((name) => <div className="featured-service" key={name}><Sparkles /><span>{name}</span></div>)}</div> : null}</div></section></Reveal>
     <section className="section"><div className="shell cta-panel"><p className="eyebrow">{locale === "en" ? "Let’s build" : "لنبدأ البناء"}</p><h2 className="h2">{c.discuss}</h2><p>{localized(profile, "contact_cta", locale, c.discussText)}</p><div className="actions"><Button asChild><Link href={`/${locale}/request-project`}>{c.request}</Link></Button><Button asChild variant="outline"><Link href={`/${locale}/contact`}>{c.contact}</Link></Button></div></div></section>
   </main>;
 }
@@ -95,7 +100,8 @@ export async function Projects({ locale }: { locale: Locale }) {
 }
 
 export async function ProjectDetail({ locale, slug }: { locale: Locale; slug: string }) {
-  const project = await read<ProjectRecord | null>(`/projects/${slug}`, null) ?? projectFallbacks().find((item) => item.slug === slug);
+  const project = await read<ProjectRecord | null>(`/projects/${slug}`, null)
+    ?? (!isProductionDeployment ? projectFallbacks().find((item) => item.slug === slug) : undefined);
   if (!project) return null;
   const title = locale === "ar" ? project.title_ar : project.title_en;
   const sections = [
@@ -117,7 +123,7 @@ export async function ProjectDetail({ locale, slug }: { locale: Locale; slug: st
 
 export async function Skills({ locale, compact = false }: { locale: Locale; compact?: boolean }) {
   const [skills, categories] = await Promise.all([read<Row[]>("/skills", []), read<Row[]>("/skill-categories", [])]);
-  const groups = skills.length && categories.length ? categories.map((category) => [localized(category, "name", locale), skills.filter((skill) => skill.category_id === category.id).map((skill) => String(skill.name))] as const) : skillGroups;
+  const groups = skills.length && categories.length ? categories.map((category) => [localized(category, "name", locale), skills.filter((skill) => skill.category_id === category.id).map((skill) => String(skill.name))] as const) : isProductionDeployment ? [] : skillGroups;
   return <Reveal><section className="section"><div className="shell"><p className="eyebrow">Capabilities / 05</p><h2 className="h2 section-title">{locale === "en" ? "A structured toolkit for real systems." : "أدوات منظمة لبناء أنظمة حقيقية."}</h2><div className="skill-grid">{(compact ? groups.slice(0, 6) : groups).map(([name, items]) => <article className="glass skill-card" key={name}><h3>{name}</h3><div className="chips">{items.map((item) => <span className="chip" key={item}>{item}</span>)}</div></article>)}</div></div></section></Reveal>;
 }
 

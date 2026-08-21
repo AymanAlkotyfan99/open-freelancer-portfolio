@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -307,10 +308,10 @@ class ExternalMediaIn(PortfolioModel):
     @field_validator("url")
     @classmethod
     def supported_video_url(cls, value: str) -> str:
-        lowered = value.lower()
-        if not lowered.startswith("https://") or not any(
-            host in lowered for host in ("youtube.com/", "youtu.be/", "vimeo.com/")
-        ):
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").lower()
+        allowed_hosts = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
+        if parsed.scheme != "https" or hostname not in allowed_hosts or parsed.username:
             raise ValueError("Only HTTPS YouTube or Vimeo URLs are supported")
         return value
 
@@ -344,8 +345,8 @@ class PackageRequestIn(PortfolioModel):
     preferred_start_date: date | None = None
     reference_project_id: UUID | None = None
     consent: bool
-    turnstile_token: str = ""
-    website: str = ""
+    turnstile_token: str = Field("", max_length=2048)
+    website: str = Field("", max_length=200)
 
     @field_validator("consent")
     @classmethod
@@ -353,6 +354,20 @@ class PackageRequestIn(PortfolioModel):
         if not value:
             raise ValueError("Consent is required")
         return value
+
+
+class RequestStatusPatch(PortfolioModel):
+    status: Literal[
+        "new", "reviewing", "contacted", "in_discussion", "accepted", "rejected", "archived"
+    ] | None = None
+    admin_notes: str | None = Field(None, max_length=10000)
+    internal_notes: str | None = Field(None, max_length=10000)
+
+    @model_validator(mode="after")
+    def has_change(self) -> "RequestStatusPatch":
+        if self.status is None and self.admin_notes is None and self.internal_notes is None:
+            raise ValueError("At least one update is required")
+        return self
 
 
 class ProfilePatch(PortfolioModel):

@@ -12,18 +12,18 @@ import { Turnstile } from "./turnstile";
 import { Button } from "./ui/button";
 
 const contactSchema = z.object({
-  full_name: z.string().min(2), email: z.string().email(), subject: z.string().min(3),
-  message: z.string().min(20), preferred_contact: z.enum(["email", "phone", "whatsapp", "telegram"]),
-  consent: z.literal(true), website: z.string().optional(), turnstile_token: z.string().optional(),
+  full_name: z.string().min(2).max(160), email: z.string().email().max(254), subject: z.string().min(3).max(240),
+  message: z.string().min(20).max(5000), preferred_contact: z.enum(["email", "phone", "whatsapp", "telegram"]),
+  consent: z.literal(true), website: z.string().max(200).optional(), turnstile_token: z.string().max(2048).optional(),
 });
 const requestSchema = z.object({
-  client_name: z.string().min(2), email: z.string().email(), company_name: z.string().optional(),
-  phone: z.string().optional(), whatsapp: z.string().optional(), telegram: z.string().optional(),
+  client_name: z.string().min(2).max(160), email: z.string().email().max(254), company_name: z.string().max(200).optional(),
+  phone: z.string().max(80).optional(), whatsapp: z.string().max(100).optional(), telegram: z.string().max(100).optional(),
   preferred_contact_method: z.enum(["email", "phone", "whatsapp", "telegram"]),
-  service_id: z.string().optional(), package_id: z.string().optional(), project_title: z.string().min(3),
-  project_description: z.string().min(20), expected_deliverables: z.string().optional(),
-  preferred_start_date: z.string().optional(), consent: z.literal(true), website: z.string().optional(),
-  turnstile_token: z.string().optional(),
+  service_id: z.union([z.string().uuid(), z.literal("")]).optional(), package_id: z.union([z.string().uuid(), z.literal("")]).optional(), project_title: z.string().min(3).max(240),
+  project_description: z.string().min(20).max(10000), expected_deliverables: z.string().max(5000).optional(),
+  preferred_start_date: z.string().optional(), consent: z.literal(true), website: z.string().max(200).optional(),
+  turnstile_token: z.string().max(2048).optional(),
 });
 type Contact = z.infer<typeof contactSchema>;
 type RequestData = z.infer<typeof requestSchema>;

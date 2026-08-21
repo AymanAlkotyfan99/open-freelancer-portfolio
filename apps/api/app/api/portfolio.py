@@ -1,4 +1,5 @@
 import csv
+import html
 import io
 import secrets
 from datetime import datetime, timezone
@@ -43,12 +44,13 @@ from app.schemas.portfolio import (
     ProjectPatch,
     RelatedProjectIn,
     ReorderIn,
+    RequestStatusPatch,
     ServiceIn,
     ServicePatch,
 )
 from app.security.auth import current_admin
-from app.services.integrations import enforce_rate_limit, send_email, verify_turnstile
-from app.services.media import destroy_media, upload_media, validate_media
+from app.services.integrations import client_ip, enforce_rate_limit, send_email, verify_turnstile
+from app.services.media import destroy_media, private_attachment_url, upload_media, validate_media
 
 router = APIRouter()
 
@@ -73,7 +75,7 @@ def audit(admin: AdminUser, action: str, entity_type: str, entity_id: Any, reque
         action=action,
         entity_type=entity_type,
         entity_id=str(entity_id),
-        request_id=request.headers.get("X-Request-ID"),
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -402,18 +404,22 @@ async def create_request(
     enforce_rate_limit(request, "custom-offer" if custom else "package-request", 3, 300)
     if payload.website:
         return {"message": "Request received", "reference": "PENDING"}
-    await verify_turnstile(payload.turnstile_token, request.client.host if request.client else "")
+    await verify_turnstile(payload.turnstile_token, client_ip(request))
     service: Service | None = None
     package: ServicePackage | None = None
     feature_snapshot: list[dict[str, Any]] = []
     if payload.service_id:
-        service = await db.get(Service, payload.service_id)
+        service = await db.scalar(
+            select(Service).where(Service.id == payload.service_id).with_for_update()
+        )
         if not service or service.deleted_at or service.publication_status != "published" or service.availability_status != "available" or not service.is_active:
             raise HTTPException(422, "The selected service is not currently available")
     if not custom:
         if not service or not payload.package_id:
             raise HTTPException(422, "A published service and active package are required")
-        package = await db.get(ServicePackage, payload.package_id)
+        package = await db.scalar(
+            select(ServicePackage).where(ServicePackage.id == payload.package_id).with_for_update()
+        )
         if not package or package.service_id != service.id or package.deleted_at or not package.is_active:
             raise HTTPException(422, "The selected package is not currently available")
         comparison = await comparison_payload(db, service.id, [package])
@@ -425,6 +431,17 @@ async def create_request(
                 "value_type": feature["value_type"],
                 "value": None if not value else value.get(f"value_{feature['value_type']}") if feature["value_type"] != "text" else {"en": value.get("value_text_en"), "ar": value.get("value_text_ar")},
             })
+    if payload.reference_project_id:
+        reference_project = await db.scalar(
+            select(Project).where(
+                Project.id == payload.reference_project_id,
+                Project.publication_status == "published",
+                Project.is_active.is_(True),
+                Project.deleted_at.is_(None),
+            )
+        )
+        if not reference_project:
+            raise HTTPException(422, "The reference project is not available")
     reference = f"AN-{secrets.token_urlsafe(8).replace('-', '').replace('_', '').upper()[:10]}"
     row = ProjectRequest(
         reference=reference,
@@ -462,7 +479,8 @@ async def create_request(
     await db.commit()
     delivered = send_email(
         f"New {'custom offer' if custom else 'package'} request {reference}",
-        f"<h2>{payload.project_title}</h2><p>{payload.client_name}</p><p>{payload.project_description}</p>",
+        f"<h2>{html.escape(payload.project_title)}</h2><p>{html.escape(payload.client_name)}</p>"
+        f"<p>{html.escape(payload.project_description)}</p>",
     )
     row.email_delivered = delivered
     await db.commit()
@@ -582,6 +600,7 @@ async def admin_delete_project(project_id: UUID, request: Request, admin: AdminU
 
 @router.post("/admin/projects/{project_id}/media", status_code=201)
 async def upload_project_media(project_id: UUID, request: Request, file: UploadFile = File(...), admin: AdminUser = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    enforce_rate_limit(request, "admin-project-media", 20, 300)
     project = await db.get(Project, project_id)
     if not project or project.deleted_at:
         raise HTTPException(404, "Project not found")
@@ -757,6 +776,7 @@ async def upload_service_cover(
     admin: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
+    enforce_rate_limit(request, "admin-service-cover", 20, 300)
     service = await db.get(Service, service_id)
     if not service or service.deleted_at:
         raise HTTPException(404, "Service not found")
@@ -1066,7 +1086,13 @@ async def export_requests(_: AdminUser = Depends(current_admin), db: AsyncSessio
     writer.writeheader()
     for row in rows:
         data = row_dict(row)
-        writer.writerow({field: data.get(field) for field in fields})
+
+        def safe_csv(value: Any) -> Any:
+            if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+                return "'" + value
+            return value
+
+        writer.writerow({field: safe_csv(data.get(field)) for field in fields})
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=project-requests.csv"})
 
 
@@ -1077,22 +1103,26 @@ async def admin_request(request_id: UUID, _: AdminUser = Depends(current_admin),
         raise HTTPException(404, "Request not found")
     result = row_dict(row)
     attachments = (await db.scalars(select(ProjectRequestAttachment).where(ProjectRequestAttachment.request_id == row.id, ProjectRequestAttachment.deleted_at.is_(None)))).all()
-    result["attachments"] = [row_dict(item) for item in attachments]
+    result["attachments"] = [
+        {
+            **row_dict(item),
+            "secure_url": private_attachment_url(item.public_id, item.original_name),
+            "url_expires_in_seconds": 300,
+        }
+        for item in attachments
+    ]
     return result
 
 
 @router.patch("/admin/project-requests/{request_id}")
-async def update_request(request_id: UUID, data: dict[str, Any], request: Request, admin: AdminUser = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def update_request(request_id: UUID, data: RequestStatusPatch, request: Request, admin: AdminUser = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     row = await db.get(ProjectRequest, request_id)
     if not row:
         raise HTTPException(404, "Request not found")
-    allowed_statuses = {"new", "reviewing", "contacted", "in_discussion", "accepted", "rejected", "archived"}
-    if "status" in data:
-        if data["status"] not in allowed_statuses:
-            raise HTTPException(422, "Invalid request status")
-        row.status = data["status"]
-    if "admin_notes" in data or "internal_notes" in data:
-        row.internal_notes = str(data.get("admin_notes", data.get("internal_notes", "")))[:10000]
+    if data.status is not None:
+        row.status = data.status
+    if data.admin_notes is not None or data.internal_notes is not None:
+        row.internal_notes = data.admin_notes if data.admin_notes is not None else data.internal_notes
     db.add(audit(admin, "update", "project_request", row.id, request))
     await db.commit()
     await db.refresh(row)
@@ -1129,6 +1159,9 @@ async def update_profile_photo(
     admin: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
+    enforce_rate_limit(request, "admin-profile-photo", 20, 300)
+    if not (1 <= len(alt_text_en.strip()) <= 300 and 1 <= len(alt_text_ar.strip()) <= 300):
+        raise HTTPException(422, "Photo alternative text must be between 1 and 300 characters")
     profile = await db.scalar(select(Profile).where(Profile.deleted_at.is_(None)).order_by(Profile.created_at))
     if not profile:
         raise HTTPException(404, "Profile not configured")

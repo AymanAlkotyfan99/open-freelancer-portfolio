@@ -1,11 +1,14 @@
+import asyncio
+import html
 import secrets
-from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from sqlalchemy import asc, func, select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import JSON, String, asc, func, select, text
+from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -31,6 +34,7 @@ from app.models.entities import (
 )
 from app.schemas.api import ContactIn, LoginIn, PasswordChange, ProjectRequestIn, StatusPatch
 from app.security.auth import (
+    DUMMY_PASSWORD_HASH,
     create_token,
     current_admin,
     hash_password,
@@ -38,11 +42,13 @@ from app.security.auth import (
     verify_password,
 )
 from app.services.integrations import (
+    client_ip,
     enforce_rate_limit,
     github_summary,
     send_email,
     verify_turnstile,
 )
+from app.services.media import upload_private_attachment, validate_attachment
 
 router = APIRouter()
 
@@ -56,13 +62,18 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
 
 
+@router.get("/ready")
+async def ready(db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+    await db.execute(text("SELECT 1"))
+    return {"status": "ready", "database": "reachable"}
+
+
 PUBLIC_LISTS = {
     "skills": Skill,
     "skill-categories": SkillCategory,
     "projects": Project,
     "project-images": ProjectImage,
     "project-technologies": ProjectTechnology,
-    "project-request-attachments": ProjectRequestAttachment,
     "services": Service,
     "experiences": Experience,
     "education": Education,
@@ -115,7 +126,9 @@ async def public_settings(db: AsyncSession = Depends(get_db)) -> list[dict[str, 
 
 
 @router.get("/github/summary")
-async def github(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def github(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    # Bound calls to the external provider even when its response is not cacheable.
+    enforce_rate_limit(request, "github-summary", 30, 300)
     setting = await db.scalar(select(SiteSetting).where(SiteSetting.key == "github_allowlist"))
     allowlist = (setting.value if setting else {}).get("repositories", [])
     return {
@@ -132,13 +145,14 @@ async def contact(
     enforce_rate_limit(request, "contact")
     if payload.website:
         return {"message": "Message received"}
-    await verify_turnstile(payload.turnstile_token, request.client.host if request.client else "")
+    await verify_turnstile(payload.turnstile_token, client_ip(request))
     row = ContactMessage(**payload.model_dump(exclude={"consent", "turnstile_token", "website"}))
     db.add(row)
     await db.commit()
     delivered = send_email(
         "New portfolio contact",
-        f"<h2>{payload.subject}</h2><p>From {payload.full_name}</p><p>{payload.message}</p>",
+        f"<h2>{html.escape(payload.subject)}</h2><p>From {html.escape(payload.full_name)}</p>"
+        f"<p>{html.escape(payload.message)}</p>",
     )
     row.email_delivered = delivered
     await db.commit()
@@ -152,7 +166,7 @@ async def request_project(
     enforce_rate_limit(request, "project-request", 3, 300)
     if payload.website:
         return {"message": "Request received", "reference": "PENDING"}
-    await verify_turnstile(payload.turnstile_token, request.client.host if request.client else "")
+    await verify_turnstile(payload.turnstile_token, client_ip(request))
     reference = f"AN-{secrets.token_hex(5).upper()}"
     row = ProjectRequest(
         reference=reference, **payload.model_dump(exclude={"consent", "turnstile_token", "website"})
@@ -161,7 +175,8 @@ async def request_project(
     await db.commit()
     delivered = send_email(
         f"New project request {reference}",
-        f"<h2>{payload.project_title}</h2><p>{payload.client_name}</p><p>{payload.description}</p>",
+        f"<h2>{html.escape(payload.project_title)}</h2><p>{html.escape(payload.client_name)}</p>"
+        f"<p>{html.escape(payload.description)}</p>",
     )
     row.email_delivered = delivered
     await db.commit()
@@ -175,64 +190,29 @@ async def request_attachment(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    import cloudinary
-    import cloudinary.uploader
-
     enforce_rate_limit(request, "project-attachment", 3, 300)
     project_request = await db.scalar(
         select(ProjectRequest).where(ProjectRequest.reference == reference)
     )
     if not project_request:
         raise HTTPException(404, "Project request not found")
-    allowed: dict[str, tuple[str, Callable[[bytes], bool]]] = {
-        "application/pdf": (".pdf", lambda value: value.startswith(b"%PDF-")),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": (
-            ".docx",
-            lambda value: value.startswith(b"PK"),
-        ),
-        "image/png": (".png", lambda value: value.startswith(b"\x89PNG\r\n\x1a\n")),
-        "image/jpeg": (".jpg", lambda value: value.startswith(b"\xff\xd8\xff")),
-    }
-    rule = allowed.get(file.content_type or "")
-    filename = (file.filename or "").lower()
-    valid_jpeg_extension = file.content_type == "image/jpeg" and filename.endswith(".jpeg")
-    if not rule or (not filename.endswith(rule[0]) and not valid_jpeg_extension):
-        raise HTTPException(422, "Unsupported file type")
-    content = await file.read(10 * 1024 * 1024 + 1)
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, "File exceeds 10 MB")
-    if not rule[1](content):
-        raise HTTPException(422, "File content does not match its declared type")
-    if not settings.cloudinary_cloud_name:
-        raise HTTPException(503, "Media storage is not configured")
-    cloudinary.config(
-        cloud_name=settings.cloudinary_cloud_name,
-        api_key=settings.cloudinary_api_key,
-        api_secret=settings.cloudinary_api_secret,
-        secure=True,
-    )
-    public_id = secrets.token_urlsafe(18)
-    result = cloudinary.uploader.upload(
-        content,
-        folder="ayman-portfolio/project-requests",
-        public_id=public_id,
-        resource_type="auto",
-    )
+    content, mime, suffix, original_name = await validate_attachment(file)
+    result = await upload_private_attachment(content, suffix)
     attachment = ProjectRequestAttachment(
         request_id=project_request.id,
-        original_name=file.filename or f"attachment{rule[0]}",
+        original_name=original_name,
         secure_url=result["secure_url"],
         public_id=result["public_id"],
-        mime_type=file.content_type or "application/octet-stream",
+        mime_type=mime,
         size_bytes=len(content),
     )
     db.add(attachment)
     await db.commit()
-    return {"id": attachment.id, "secure_url": attachment.secure_url}
+    return {"id": attachment.id, "message": "Attachment stored"}
 
 
 def set_auth_cookies(response: Response, user: AdminUser) -> None:
-    secure = settings.environment == "production"
+    secure = settings.is_production
     access = create_token(
         str(user.id), "access", timedelta(minutes=settings.access_token_expire_minutes)
     )
@@ -245,7 +225,8 @@ def set_auth_cookies(response: Response, user: AdminUser) -> None:
         access,
         httponly=True,
         secure=secure,
-        samesite="lax",
+        samesite=settings.cookie_samesite,
+        domain=settings.cookie_domain or None,
         max_age=settings.access_token_expire_minutes * 60,
     )
     response.set_cookie(
@@ -253,7 +234,8 @@ def set_auth_cookies(response: Response, user: AdminUser) -> None:
         refresh,
         httponly=True,
         secure=secure,
-        samesite="strict",
+        samesite=settings.cookie_samesite,
+        domain=settings.cookie_domain or None,
         path="/api/v1/auth",
         max_age=settings.refresh_token_expire_days * 86400,
     )
@@ -265,17 +247,22 @@ async def login(
 ) -> dict[str, str]:
     enforce_rate_limit(request, "login", 5, 300)
     user = await db.scalar(
-        select(AdminUser).where(func.lower(AdminUser.email) == payload.email.lower())
+        select(AdminUser)
+        .where(func.lower(AdminUser.email) == payload.email.lower())
+        .with_for_update()
     )
-    if (
-        not user
-        or (user.locked_until and user.locked_until > datetime.now(timezone.utc))
-        or not verify_password(payload.password, user.password_hash)
-    ):
+    now = datetime.now(timezone.utc)
+    if not user:
+        verify_password(payload.password, DUMMY_PASSWORD_HASH)
+        raise HTTPException(401, "Invalid credentials")
+    if not user.is_active or (user.locked_until and user.locked_until > now):
+        verify_password(payload.password, DUMMY_PASSWORD_HASH)
+        raise HTTPException(401, "Invalid credentials")
+    if not verify_password(payload.password, user.password_hash):
         if user:
             user.failed_login_attempts += 1
             if user.failed_login_attempts >= 5:
-                user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=15)
+                user.locked_until = now + timedelta(minutes=15)
             await db.commit()
         raise HTTPException(401, "Invalid credentials")
     user.failed_login_attempts = 0
@@ -291,14 +278,15 @@ async def refresh(
 ) -> dict[str, str]:
     from app.security.auth import decode_token
 
+    enforce_rate_limit(request, "refresh", 10, 300)
     token = request.cookies.get("refresh_token", "")
     payload = decode_token(token, "refresh")
     try:
         subject = UUID(str(payload["sub"]))
     except (TypeError, ValueError) as exc:
         raise HTTPException(401, "Invalid session") from exc
-    user = await db.scalar(select(AdminUser).where(AdminUser.id == subject))
-    if not user or user.refresh_token_hash != token_hash(token):
+    user = await db.scalar(select(AdminUser).where(AdminUser.id == subject).with_for_update())
+    if not user or not user.is_active or user.refresh_token_hash != token_hash(token):
         raise HTTPException(401, "Invalid session")
     set_auth_cookies(response, user)
     await db.commit()
@@ -312,8 +300,10 @@ async def logout(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     admin.refresh_token_hash = None
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token", path="/api/v1/auth")
+    response.delete_cookie("access_token", domain=settings.cookie_domain or None)
+    response.delete_cookie(
+        "refresh_token", path="/api/v1/auth", domain=settings.cookie_domain or None
+    )
     await db.commit()
     return {"message": "Signed out"}
 
@@ -346,11 +336,8 @@ async def change_password(
 
 
 ADMIN_MODELS = {
-    "profile": Profile,
     "skills": Skill,
     "skill-categories": SkillCategory,
-    "projects": Project,
-    "services": Service,
     "experiences": Experience,
     "education": Education,
     "activities": Activity,
@@ -358,26 +345,47 @@ ADMIN_MODELS = {
     "site-settings": SiteSetting,
 }
 
+_SYSTEM_FIELDS = {"id", "created_at", "updated_at", "deleted_at"}
+
+
+def validate_admin_data(model: Any, data: dict[str, Any], *, creating: bool) -> dict[str, Any]:
+    columns = {column.name: column for column in model.__table__.columns if column.name not in _SYSTEM_FIELDS}
+    unknown = sorted(set(data) - set(columns))
+    if unknown:
+        raise HTTPException(422, f"Unknown or protected fields: {', '.join(unknown)}")
+    if not data:
+        raise HTTPException(422, "At least one field is required")
+    validated: dict[str, Any] = {}
+    for name, value in data.items():
+        column = columns[name]
+        if value is None:
+            if not column.nullable and (creating or column.default is None):
+                raise HTTPException(422, f"{name} cannot be null")
+            validated[name] = None
+            continue
+        if isinstance(column.type, String) and column.type.length and len(str(value)) > column.type.length:
+            raise HTTPException(422, f"{name} exceeds its maximum length")
+        if isinstance(column.type, JSON):
+            validated[name] = value
+            continue
+        try:
+            validated[name] = TypeAdapter(column.type.python_type).validate_python(value)
+        except (NotImplementedError, ValidationError, ValueError, TypeError) as exc:
+            raise HTTPException(422, f"Invalid value for {name}") from exc
+    return validated
+
 
 @router.post("/admin/uploads", status_code=201)
 async def admin_upload(
-    file: UploadFile = File(...), _: AdminUser = Depends(current_admin)
+    request: Request,
+    file: UploadFile = File(...),
+    _: AdminUser = Depends(current_admin),
 ) -> dict[str, Any]:
     import cloudinary
     import cloudinary.uploader
 
-    allowed = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "application/pdf": ".pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    }
-    suffix = allowed.get(file.content_type or "")
-    if not suffix or not (file.filename or "").lower().endswith(suffix):
-        raise HTTPException(422, "Unsupported file type")
-    content = await file.read(10 * 1024 * 1024 + 1)
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, "File exceeds 10 MB")
+    enforce_rate_limit(request, "admin-upload", 20, 300)
+    content, _mime, suffix, _original_name = await validate_attachment(file)
     if not settings.cloudinary_cloud_name:
         raise HTTPException(503, "Media storage is not configured")
     cloudinary.config(
@@ -386,11 +394,13 @@ async def admin_upload(
         api_secret=settings.cloudinary_api_secret,
         secure=True,
     )
-    result = cloudinary.uploader.upload(
+    result = await asyncio.to_thread(
+        cloudinary.uploader.upload,
         content,
         folder="ayman-portfolio/admin",
         public_id=secrets.token_urlsafe(18),
-        resource_type="auto",
+        resource_type="image" if suffix in {".jpg", ".jpeg", ".png"} else "raw",
+        overwrite=False,
     )
     return {
         "public_id": result["public_id"],
@@ -402,8 +412,8 @@ async def admin_upload(
 @router.get("/admin/{resource}")
 async def admin_list(
     resource: str,
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     _: AdminUser = Depends(current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
@@ -464,23 +474,22 @@ async def admin_create(
     model = ADMIN_MODELS.get(resource)
     if not model:
         raise HTTPException(404, "Not found")
-    valid = {
-        column.name
-        for column in model.__table__.columns
-        if column.name not in {"id", "created_at", "updated_at", "deleted_at"}
-    }
-    row = model(**{key: value for key, value in data.items() if key in valid})
+    row = model(**validate_admin_data(model, data, creating=True))
     db.add(row)
-    await db.flush()
-    db.add(
-        AuditLog(
-            admin_id=admin.id,
-            action="create",
-            entity_type=resource,
-            entity_id=str(row.id),  # type: ignore[attr-defined]
+    try:
+        await db.flush()
+        db.add(
+            AuditLog(
+                admin_id=admin.id,
+                action="create",
+                entity_type=resource,
+                entity_id=str(row.id),  # type: ignore[attr-defined]
+            )
         )
-    )
-    await db.commit()
+        await db.commit()
+    except (IntegrityError, StatementError) as exc:
+        await db.rollback()
+        raise HTTPException(409, "The record conflicts with existing or required data") from exc
     await db.refresh(row)
     return as_dict(row)
 
@@ -545,10 +554,9 @@ async def admin_update(
     row = await db.get(model, entity_id)  # type: ignore[arg-type]
     if not row:
         raise HTTPException(404, "Not found")
-    valid = {column.name for column in model.__table__.columns} - {"id", "created_at", "updated_at"}
-    for key, value in data.items():
-        if key in valid:
-            setattr(row, key, value)
+    validated = validate_admin_data(model, data, creating=False)
+    for key, value in validated.items():
+        setattr(row, key, value)
     db.add(
         AuditLog(
             admin_id=admin.id,

@@ -25,8 +25,8 @@ class ContactIn(BaseModel):
     message: str = Field(min_length=20, max_length=5000)
     preferred_contact: Literal["email", "phone", "whatsapp", "telegram"]
     consent: bool
-    turnstile_token: str = ""
-    website: str = ""
+    turnstile_token: str = Field("", max_length=2048)
+    website: str = Field("", max_length=200)
 
     @field_validator("consent")
     @classmethod
@@ -52,8 +52,8 @@ class ProjectRequestIn(BaseModel):
     preferred_start_date: date | None = None
     preferred_contact: Literal["email", "phone", "whatsapp", "telegram"]
     consent: bool
-    turnstile_token: str = ""
-    website: str = ""
+    turnstile_token: str = Field("", max_length=2048)
+    website: str = Field("", max_length=200)
 
     @field_validator("consent")
     @classmethod
@@ -68,5 +68,7 @@ class AdminPatch(BaseModel):
 
 
 class StatusPatch(BaseModel):
-    status: str
-    internal_notes: str | None = None
+    status: Literal[
+        "new", "reviewing", "contacted", "in_discussion", "accepted", "rejected", "archived"
+    ]
+    internal_notes: str | None = Field(None, max_length=10000)

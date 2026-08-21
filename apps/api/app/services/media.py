@@ -1,11 +1,15 @@
 import asyncio
+import io
 import secrets
+import time
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import cloudinary
 import cloudinary.uploader
+import cloudinary.utils
 from fastapi import HTTPException, UploadFile
 
 from app.core.config import settings
@@ -21,6 +25,15 @@ IMAGE_RULES: dict[str, MediaRule] = {
 VIDEO_RULES: dict[str, MediaRule] = {
     "video/mp4": ({".mp4"}, lambda data: data[4:8] == b"ftyp"),
     "video/webm": ({".webm"}, lambda data: data.startswith(b"\x1aE\xdf\xa3")),
+}
+ATTACHMENT_RULES: dict[str, MediaRule] = {
+    "application/pdf": ({".pdf"}, lambda data: data.startswith(b"%PDF-")),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": (
+        {".docx"},
+        lambda data: data.startswith(b"PK"),
+    ),
+    "image/png": IMAGE_RULES["image/png"],
+    "image/jpeg": IMAGE_RULES["image/jpeg"],
 }
 
 
@@ -65,6 +78,65 @@ async def validate_media(file: UploadFile, allow_video: bool = True) -> tuple[by
     if not rule[1](content[:64]):
         raise HTTPException(422, "File content does not match its declared type")
     return content, media_type
+
+
+def _is_valid_docx(content: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = set(archive.namelist())
+        return "[Content_Types].xml" in names and "word/document.xml" in names
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+async def validate_attachment(file: UploadFile) -> tuple[bytes, str, str, str]:
+    mime = file.content_type or ""
+    rule = ATTACHMENT_RULES.get(mime)
+    original_name = Path((file.filename or "attachment").replace("\\", "/")).name
+    original_name = original_name.replace("\r", "").replace("\n", "")[:255]
+    suffix = Path(original_name).suffix.lower()
+    if not rule or suffix not in rule[0]:
+        raise HTTPException(422, "Unsupported file extension or MIME type")
+    limit = settings.max_request_attachment_mb * 1024 * 1024
+    content = await file.read(limit + 1)
+    if not content:
+        raise HTTPException(422, "The uploaded file is empty")
+    if len(content) > limit:
+        raise HTTPException(413, f"File exceeds the configured {settings.max_request_attachment_mb} MB limit")
+    if not rule[1](content[:64]):
+        raise HTTPException(422, "File content does not match its declared type")
+    if suffix == ".docx" and not _is_valid_docx(content):
+        raise HTTPException(422, "The uploaded DOCX structure is invalid")
+    return content, mime, suffix, original_name or f"attachment{suffix}"
+
+
+async def upload_private_attachment(content: bytes, suffix: str) -> dict[str, Any]:
+    cloudinary_ready()
+    return await asyncio.to_thread(
+        cloudinary.uploader.upload,
+        content,
+        folder="ayman-portfolio/project-requests",
+        public_id=secrets.token_urlsafe(18),
+        format=suffix.removeprefix("."),
+        resource_type="raw",
+        type="authenticated",
+        overwrite=False,
+    )
+
+
+def private_attachment_url(public_id: str, original_name: str) -> str:
+    cloudinary_ready()
+    return str(
+        cloudinary.utils.private_download_url(
+            public_id,
+            Path(original_name).suffix.removeprefix(".").lower(),
+            resource_type="raw",
+            type="authenticated",
+            attachment=True,
+            expires_at=int(time.time()) + 300,
+            secure=True,
+        )
+    )
 
 
 def media_extension(content: bytes, media_type: str) -> str:

@@ -16,6 +16,7 @@ from app.database.session import get_db
 from app.models.entities import AdminUser
 
 hasher = PasswordHasher()
+DUMMY_PASSWORD_HASH = hasher.hash("not-a-real-password-used-only-for-timing")
 
 
 def hash_password(password: str) -> str:
@@ -47,7 +48,12 @@ def create_token(subject: str, kind: str, expires: timedelta) -> str:
 
 def decode_token(token: str, kind: str) -> dict[str, Any]:
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=["HS256"],
+            options={"require": ["sub", "type", "iat", "exp", "jti"]},
+        )
         if payload.get("type") != kind:
             raise InvalidTokenError("Wrong token type")
         return payload

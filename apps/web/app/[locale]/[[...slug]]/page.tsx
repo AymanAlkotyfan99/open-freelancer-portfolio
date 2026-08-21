@@ -6,6 +6,7 @@ import { projects } from "@/lib/content";
 import type { Locale, ProjectRecord, ServiceRecord } from "@/lib/types";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const isProductionDeployment = process.env.APP_ENVIRONMENT === "production";
 
 async function metadataRecord(path: string) {
   try { const seconds = Number(process.env.CONTENT_REVALIDATE_SECONDS ?? "300"); const response = await fetch(`${apiBase}${path}`, seconds === 0 ? { cache: "no-store" } : { next: { revalidate: seconds } }); return response.ok ? await response.json() as ProjectRecord | ServiceRecord : null; }
@@ -19,7 +20,7 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
   let image: string | undefined;
   if (slug[0] === "projects" && slug[1]) {
     const record = await metadataRecord(`/projects/${slug[1]}`) as ProjectRecord | null;
-    const fallback = projects(locale as Locale).find((item) => item.slug === slug[1]);
+    const fallback = !isProductionDeployment ? projects(locale as Locale).find((item) => item.slug === slug[1]) : undefined;
     title = record ? (locale === "ar" ? record.title_ar : record.title_en) : fallback?.title || title;
     description = record ? (locale === "ar" ? record.short_description_ar || record.summary_ar : record.short_description_en || record.summary_en) : fallback?.summary;
     image = record?.cover_url || undefined;

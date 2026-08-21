@@ -1,6 +1,6 @@
 # Ayman Naeem — production portfolio
 
-A bilingual, content-managed portfolio for an AI Software Engineer and Full-Stack Developer. It includes premium responsive public pages, a purpose-built admin dashboard, normalized project media, three-tier service packages with typed comparisons, immutable commercial request snapshots, secure uploads, transactional email hooks, Docker, CI, and Vercel/Railway/Neon deployment configuration.
+A bilingual, content-managed portfolio for an AI Software Engineer and Full-Stack Developer. It includes responsive public pages, a purpose-built admin dashboard, normalized project media, three-tier service packages with typed comparisons, immutable commercial request snapshots, secure uploads, transactional email hooks, Docker, CI, and an all-Railway production deployment for Next.js, FastAPI, and PostgreSQL.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ In a second terminal:
 ```powershell
 Set-Location apps/web
 Copy-Item .env.example .env.local
-npm.cmd install
+npm.cmd ci
 npm.cmd run dev
 ```
 
@@ -59,4 +59,4 @@ alembic upgrade head
 alembic check
 ```
 
-The Playwright command starts isolated Next.js/FastAPI servers and recreates only `apps/api/e2e.db`. See [architecture](docs/architecture.md), [API](docs/api.md), [content management](docs/content-management.md), and [deployment](docs/deployment.md). The social preview in `apps/web/public/og.png` was generated specifically for this portfolio; personal photography remains an editable profile field.
+The Playwright command starts isolated Next.js/FastAPI servers and recreates only `apps/api/e2e.db`. See [architecture](docs/architecture.md), [API](docs/api.md), [content management](docs/content-management.md), the [Railway deployment guide](docs/RAILWAY_DEPLOYMENT.md), and the [production checklist](docs/PRODUCTION_CHECKLIST.md). The social preview in `apps/web/public/og.png` was generated specifically for this portfolio; personal photography remains an editable profile field.
